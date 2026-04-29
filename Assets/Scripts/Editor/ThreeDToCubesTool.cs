@@ -1,4 +1,4 @@
-using UnityEngine;
+﻿using UnityEngine;
 using UnityEditor;
 using System.Collections.Generic;
 using System.Linq;
@@ -6,345 +6,450 @@ using System.Linq;
 public class ThreeDToCubesTool : EditorWindow {
     private GameObject sourceModel;
     private GameObject cubePrefab;
+    private Material voxelMaterial;
 
     private float cubeSize = 0.12f;
-    private bool fillSolid = true;
-    private bool hollowOut = false;
+    private Vector3 gaps = Vector3.zero;
+    private bool fillInside = true;
+    private bool hollowOut = true;
     private float brightness = 1.0f;
-    private bool xRayMode = false;
 
-    private List<ColorMappingStats> colorStats = new List<ColorMappingStats>();
+    private List<ColorMapping> colorMappings = new List<ColorMapping>();
     private Vector2 paletteScroll;
     private float colorTolerance = 0.05f;
 
-    // Interactive Preview State
-    private PreviewRenderUtility previewRenderUtility;
-    private Vector2 previewDir = new Vector2(135, -30);
-    private Vector3 previewPivot = Vector3.zero;
-    private float previewZoom = 5f;
-    private int activeGroupId = 1;
-    private Color activeColor = Color.green;
-
-    private Material previewMaterial;
-    private Dictionary<Color, Material> materialCache = new Dictionary<Color, Material>();
+    private Editor voxelEditor;
+    private Editor sourceEditor;
+    private GameObject previewRoot;
 
     [System.Serializable]
-    private class ColorMappingStats {
-        public Color originalColor;
-        public Color overrideColor;
-        public int count;
-        public int groupId;
-    }
+    public class ColorMapping { public Color originalColor; public Color overrideColor; }
 
     private struct VoxelInfo {
         public Color color;
         public int groupId;
-        public Vector3 position;
     }
 
     private Dictionary<Vector3Int, VoxelInfo> voxels = new Dictionary<Vector3Int, VoxelInfo>();
+    private List<Renderer> sourceRenderers = new List<Renderer>();
 
     [MenuItem("Tools/3D TO CUBES PRO")]
     public static void Open() {
-        var window = GetWindow<ThreeDToCubesTool>("3D to Cubes Pro - God Mode");
-        window.minSize = new Vector2(1200, 800);
+        var window = GetWindow<ThreeDToCubesTool>("3D to Cubes Pro Ultra");
+        window.minSize = new Vector2(1100, 750);
     }
 
-    private void OnEnable() {
-        if (previewRenderUtility == null) previewRenderUtility = new PreviewRenderUtility();
-        
-        Shader s = Shader.Find("Unlit/Color");
-        if (s == null) s = Shader.Find("Standard");
-        previewMaterial = new Material(s);
-        
-        RefreshPreview();
-    }
-
-    private void OnDisable() {
-        if (previewRenderUtility != null) previewRenderUtility.Cleanup();
-        ClearMaterialCache();
-        if (previewMaterial) DestroyImmediate(previewMaterial);
-    }
-
-    private void ClearMaterialCache() {
-        foreach (var mat in materialCache.Values) if (mat) DestroyImmediate(mat);
-        materialCache.Clear();
-    }
+    private void OnEnable() => RefreshPreview();
+    private void OnDisable() => Cleanup();
 
     private void OnGUI() {
         GUIStyle headerStyle = new GUIStyle(EditorStyles.boldLabel) {
-            fontSize = 20,
+            fontSize = 22,
             alignment = TextAnchor.MiddleCenter,
-            fixedHeight = 40,
-            normal = { textColor = new Color(0, 0.8f, 1f) }
+            fixedHeight = 50,
+            normal = { textColor = new Color(0, 1f, 0.9f) }
         };
-        GUILayout.Label("3D TO CUBES PRO - INTERACTIVE EDITOR", headerStyle);
+        GUILayout.Label("3D TO CUBES PRO - COMPLETE COLOR SCANNER", headerStyle);
 
         EditorGUILayout.BeginHorizontal();
 
         // SIDEBAR
-        EditorGUILayout.BeginVertical(EditorStyles.helpBox, GUILayout.Width(350), GUILayout.ExpandHeight(true));
-        DrawSidebar();
-        EditorGUILayout.EndVertical();
+        EditorGUILayout.BeginVertical(EditorStyles.helpBox, GUILayout.Width(320), GUILayout.ExpandHeight(true));
 
-        // MAIN VIEW (Dual Preview)
-        EditorGUILayout.BeginHorizontal(EditorStyles.helpBox, GUILayout.ExpandWidth(true));
-        
-        // Original Model View
-        EditorGUILayout.BeginVertical(GUILayout.ExpandWidth(true));
-        GUILayout.Label("SOURCE MODEL", EditorStyles.centeredGreyMiniLabel);
-        Rect sourceRect = GUILayoutUtility.GetRect(100, 100, GUILayout.ExpandWidth(true), GUILayout.ExpandHeight(true));
-        if (sourceModel) {
-            Editor sourceEditor = Editor.CreateEditor(sourceModel);
-            sourceEditor.OnInteractivePreviewGUI(sourceRect, EditorStyles.helpBox);
-        } else GUI.Box(sourceRect, "Assign Source Model", EditorStyles.centeredGreyMiniLabel);
-        EditorGUILayout.EndVertical();
-
-        // Voxel Preview View
-        EditorGUILayout.BeginVertical(GUILayout.ExpandWidth(true));
-        GUILayout.Label("VOXEL PREVIEW (Interactive Paint)", EditorStyles.centeredGreyMiniLabel);
-        DrawInteractivePreview();
-        EditorGUILayout.EndVertical();
-
-        EditorGUILayout.EndHorizontal();
-        EditorGUILayout.EndHorizontal();
-    }
-
-    private void DrawSidebar() {
-        GUILayout.Label("VOXELIZATION SETTINGS", EditorStyles.boldLabel);
+        GUILayout.Label("SCANNER SETTINGS", EditorStyles.boldLabel);
         EditorGUI.BeginChangeCheck();
-        sourceModel = (GameObject)EditorGUILayout.ObjectField("Base Model", sourceModel, typeof(GameObject), true);
+
+        sourceModel = (GameObject)EditorGUILayout.ObjectField("Source 3D Model", sourceModel, typeof(GameObject), true);
         cubePrefab = (GameObject)EditorGUILayout.ObjectField("Cube Prefab", cubePrefab, typeof(GameObject), false);
-        
+        voxelMaterial = (Material)EditorGUILayout.ObjectField("Voxel Material", voxelMaterial, typeof(Material), false);
+
         EditorGUILayout.Space(5);
-        cubeSize = EditorGUILayout.Slider("Cube Detail", cubeSize, 0.02f, 1.0f);
-        
         using (new EditorGUILayout.HorizontalScope()) {
-            fillSolid = EditorGUILayout.ToggleLeft("SOLID FILL", fillSolid, GUILayout.Width(100));
-            hollowOut = EditorGUILayout.ToggleLeft("HOLLOW", hollowOut, GUILayout.Width(80));
-            xRayMode = EditorGUILayout.ToggleLeft("X-RAY", xRayMode, GUILayout.Width(80));
+            EditorGUILayout.PrefixLabel("Cube Detail");
+            cubeSize = EditorGUILayout.Slider(cubeSize, 0.0001f, 3.0f);
+            cubeSize = EditorGUILayout.FloatField(cubeSize, GUILayout.Width(50));
         }
 
-        if (EditorGUI.EndChangeCheck()) RefreshPreview();
+        gaps = EditorGUILayout.Vector3Field("Spacing Gaps", gaps);
+        fillInside = EditorGUILayout.Toggle("Solid Fill", fillInside);
+        hollowOut = EditorGUILayout.Toggle("Hollow (Empty Inside)", hollowOut);
+        brightness = EditorGUILayout.Slider("Color Brightness", brightness, 0.5f, 2.5f);
 
-        GUILayout.Space(15);
-        GUILayout.Label("PAINT BRUSH", EditorStyles.boldLabel);
-        activeColor = EditorGUILayout.ColorField("Color", activeColor);
-        activeGroupId = EditorGUILayout.IntField("Group ID", activeGroupId);
-        
-        EditorGUILayout.HelpBox("RIGHT CLICK: Paint single cube\nRIGHT DRAG: Paint surface\nSCROLL: Zoom", MessageType.None);
+        if (EditorGUI.EndChangeCheck())
+            RefreshPreview();
 
-        GUILayout.Space(10);
-        GUILayout.Label("COLOR PALETTE", EditorStyles.boldLabel);
-        paletteScroll = EditorGUILayout.BeginScrollView(paletteScroll, GUILayout.Height(200));
-        foreach (var stats in colorStats) {
+        GUILayout.Label("COLOR PALETTE & OVERRIDES", EditorStyles.boldLabel);
+        using (new EditorGUILayout.HorizontalScope()) {
+            if (GUILayout.Button("🔍 Scan"))
+                ScanPalette();
+            if (GUILayout.Button("✨ Clear"))
+                ClearOverrides();
+        }
+
+        if (GUILayout.Button("APPLY COLOR CHANGES", GUILayout.Height(25)))
+            RefreshPreview();
+
+        colorTolerance = EditorGUILayout.Slider("Match Tol.", colorTolerance, 0.01f, 0.3f);
+
+        paletteScroll = EditorGUILayout.BeginScrollView(paletteScroll, GUILayout.Height(180));
+        for (int i = 0; i < colorMappings.Count; i++) {
+            var mapping = colorMappings[i];
             EditorGUILayout.BeginHorizontal(EditorStyles.helpBox);
-            EditorGUILayout.ColorField(GUIContent.none, stats.overrideColor, false, false, false, GUILayout.Width(40));
-            EditorGUILayout.LabelField($"{stats.count} Cubes", EditorStyles.miniBoldLabel);
-            if (GUILayout.Button("Pick", GUILayout.Width(45))) {
-                activeColor = stats.overrideColor;
-                activeGroupId = stats.groupId;
-            }
+            EditorGUILayout.ColorField(GUIContent.none, mapping.originalColor, false, true, false, GUILayout.Width(35));
+            EditorGUILayout.LabelField("→", GUILayout.Width(15));
+            EditorGUI.BeginChangeCheck();
+            mapping.overrideColor = EditorGUILayout.ColorField(GUIContent.none, mapping.overrideColor, false, true, false, GUILayout.Width(35));
+            if (EditorGUI.EndChangeCheck())
+                RefreshPreview();
+            if (GUILayout.Button("Set", GUILayout.Width(45)))
+                RefreshPreview();
             EditorGUILayout.EndHorizontal();
         }
         EditorGUILayout.EndScrollView();
 
-        GUILayout.FlexibleSpace();
-        GUILayout.Label($"LIVE CUBE COUNT: {voxels.Count:N0}", EditorStyles.boldLabel);
+        GUILayout.Label($"TOTAL CUBES: {voxels.Count:N0}",
+            new GUIStyle(EditorStyles.label) { alignment = TextAnchor.MiddleCenter, fontSize = 13, normal = { textColor = Color.yellow } });
 
-        GUI.backgroundColor = new Color(0, 0.8f, 0.2f);
-        if (GUILayout.Button("GENERATE MODEL", GUILayout.Height(50))) StartVoxelization();
+        GUI.backgroundColor = new Color(0, 0.9f, 0.3f);
+        if (GUILayout.Button("GENERATE COMPLETE MODEL", GUILayout.Height(50))) {
+            if (sourceModel && cubePrefab)
+                StartVoxelization();
+        }
         GUI.backgroundColor = Color.white;
+
+        EditorGUILayout.EndVertical();
+
+        // PREVIEWS
+        EditorGUILayout.BeginHorizontal(EditorStyles.helpBox, GUILayout.ExpandWidth(true));
+
+        EditorGUILayout.BeginVertical(GUILayout.ExpandWidth(true));
+        GUILayout.Label("ACTUAL MODEL", new GUIStyle(EditorStyles.centeredGreyMiniLabel) { fontSize = 14, fontStyle = FontStyle.Bold });
+        Rect actualRect = GUILayoutUtility.GetRect(200, 200, GUILayout.ExpandWidth(true), GUILayout.ExpandHeight(true));
+        if (sourceModel != null) {
+            if (sourceEditor == null || sourceEditor.target != sourceModel)
+                sourceEditor = Editor.CreateEditor(sourceModel);
+            sourceEditor.OnInteractivePreviewGUI(actualRect, EditorStyles.helpBox);
+        } else
+            GUI.Box(actualRect, "Assign Source Model", EditorStyles.centeredGreyMiniLabel);
+        EditorGUILayout.EndVertical();
+
+        EditorGUILayout.BeginVertical(GUILayout.ExpandWidth(true));
+        GUILayout.Label("VOXELIZED RESULT (Prefab Preview)", new GUIStyle(EditorStyles.centeredGreyMiniLabel) { fontSize = 14, fontStyle = FontStyle.Bold });
+        Rect voxelRect = GUILayoutUtility.GetRect(200, 200, GUILayout.ExpandWidth(true), GUILayout.ExpandHeight(true));
+
+        if (previewRoot != null) {
+            if (voxelEditor == null || voxelEditor.target != previewRoot)
+                voxelEditor = Editor.CreateEditor(previewRoot);
+            voxelEditor.OnInteractivePreviewGUI(voxelRect, EditorStyles.helpBox);
+        } else
+            GUI.Box(voxelRect, "Assign Cube Prefab aur Scan karo", EditorStyles.centeredGreyMiniLabel);
+        EditorGUILayout.EndVertical();
+
+        EditorGUILayout.EndHorizontal();
+        EditorGUILayout.EndHorizontal();
     }
 
-    private void DrawInteractivePreview() {
-        Rect rect = GUILayoutUtility.GetRect(100, 100, GUILayout.ExpandWidth(true), GUILayout.ExpandHeight(true));
-        if (rect.width <= 1) return;
-
-        previewRenderUtility.BeginPreview(rect, EditorStyles.helpBox);
-        HandleInput(rect);
-
-        previewRenderUtility.camera.transform.position = previewPivot + Quaternion.Euler(previewDir.y, previewDir.x, 0) * (Vector3.back * previewZoom);
-        previewRenderUtility.camera.transform.LookAt(previewPivot);
-        previewRenderUtility.camera.backgroundColor = new Color(0.12f, 0.12f, 0.12f, 1);
-        previewRenderUtility.camera.farClipPlane = 1000f;
-
-        Mesh cubeMesh = cubePrefab ? cubePrefab.GetComponentInChildren<MeshFilter>()?.sharedMesh : null;
-        if (!cubeMesh) cubeMesh = Resources.GetBuiltinResource<Mesh>("Cube.fbx");
-
-        foreach (var v in voxels.Values) {
-            Material mat = GetCachedMaterial(v.color);
-            Matrix4x4 trs = Matrix4x4.TRS(v.position, Quaternion.identity, Vector3.one * cubeSize * 0.95f);
-            previewRenderUtility.DrawMesh(cubeMesh, trs, mat, 0);
+    private Bounds GetBounds() {
+        Bounds b = new Bounds();
+        if (sourceRenderers.Count > 0) {
+            b = sourceRenderers[0].bounds;
+            foreach (var r in sourceRenderers)
+                b.Encapsulate(r.bounds);
         }
-
-        previewRenderUtility.Render();
-        Texture result = previewRenderUtility.EndPreview();
-        GUI.DrawTexture(rect, result, ScaleMode.StretchToFill, false);
-        Repaint();
-    }
-
-    private Material GetCachedMaterial(Color c) {
-        if (!materialCache.TryGetValue(c, out Material mat)) {
-            mat = new Material(previewMaterial);
-            mat.color = c * brightness;
-            if (xRayMode) {
-                mat.SetInt("_SrcBlend", (int)UnityEngine.Rendering.BlendMode.SrcAlpha);
-                mat.SetInt("_DstBlend", (int)UnityEngine.Rendering.BlendMode.OneMinusSrcAlpha);
-                mat.SetInt("_ZWrite", 0);
-                mat.EnableKeyword("_ALPHABLEND_ON");
-                mat.renderQueue = 3000;
-                mat.color = new Color(mat.color.r, mat.color.g, mat.color.b, 0.35f);
-            }
-            materialCache[c] = mat;
-        }
-        return mat;
-    }
-
-    private void HandleInput(Rect rect) {
-        Event e = Event.current;
-        if (!rect.Contains(e.mousePosition)) return;
-
-        if (e.type == EventType.MouseDown && e.button == 1) { PaintVoxel(e.mousePosition, rect); e.Use(); }
-        else if (e.type == EventType.MouseDrag) {
-            if (e.button == 0) { previewDir += e.delta * 0.5f; e.Use(); }
-            else if (e.button == 1) { PaintVoxel(e.mousePosition, rect); e.Use(); }
-        } else if (e.type == EventType.ScrollWheel) {
-            previewZoom += e.delta.y * 0.1f;
-            e.Use();
-        }
-    }
-
-    private void PaintVoxel(Vector2 mousePos, Rect rect) {
-        Ray ray = previewRenderUtility.camera.ScreenPointToRay(new Vector2(mousePos.x - rect.x, rect.height - (mousePos.y - rect.y)));
-        Vector3Int bestKey = Vector3Int.zero; float minD = float.MaxValue; bool hit = false;
-
-        foreach (var kvp in voxels) {
-            if (new Bounds(kvp.Value.position, Vector3.one * cubeSize).IntersectRay(ray, out float d)) {
-                if (d < minD) { minD = d; bestKey = kvp.Key; hit = true; }
-            }
-        }
-        if (hit) {
-            var v = voxels[bestKey]; v.color = activeColor; v.groupId = activeGroupId; voxels[bestKey] = v;
-            UpdateStatsOnly();
-        }
+        return b;
     }
 
     private void RefreshPreview() {
-        voxels.Clear();
-        ClearMaterialCache();
-        if (!sourceModel) return;
+        if (sourceModel == null)
+            return;
+        Cleanup();
 
-        GameObject temp = Instantiate(sourceModel);
-        temp.transform.position = Vector3.zero;
-        temp.transform.rotation = Quaternion.identity;
-        
-        foreach (var r in temp.GetComponentsInChildren<Renderer>()) {
-            Mesh m = r is MeshRenderer mr ? mr.GetComponent<MeshFilter>()?.sharedMesh : r is SkinnedMeshRenderer smr ? smr.sharedMesh : null;
-            if (m && !r.GetComponent<Collider>()) r.gameObject.AddComponent<MeshCollider>().sharedMesh = m;
+        GameObject scanTemp = Instantiate(sourceModel);
+        scanTemp.transform.SetPositionAndRotation(Vector3.zero, Quaternion.identity);
+
+        sourceRenderers.Clear();
+        foreach (var renderer in scanTemp.GetComponentsInChildren<Renderer>()) {
+            Mesh mesh = renderer is MeshRenderer mr ? mr.GetComponent<MeshFilter>()?.sharedMesh :
+                        renderer is SkinnedMeshRenderer smr ? smr.sharedMesh : null;
+
+            if (mesh != null) {
+                if (!renderer.gameObject.GetComponent<MeshCollider>()) {
+                    var col = renderer.gameObject.AddComponent<MeshCollider>();
+                    col.sharedMesh = mesh;
+                }
+                sourceRenderers.Add(renderer);
+            }
         }
 
-        Bounds b = GetBoundsFromObj(temp);
-        previewPivot = b.center;
-        previewZoom = b.size.magnitude * 1.5f;
+        Bounds b = GetBounds();
+        voxels.Clear();
+        PerformFullScan(b);
+        BuildPrefabPreview(b);
 
-        PerformScan(b);
-        DestroyImmediate(temp);
-        ScanPalette();
+        DestroyImmediate(scanTemp);
+        Repaint();
     }
 
-    private void PerformScan(Bounds b) {
-        float step = cubeSize;
-        // Efficient scanning from front and back
-        for (float x = b.min.x + step * 0.5f; x <= b.max.x; x += step)
-            for (float y = b.min.y + step * 0.5f; y <= b.max.y; y += step) {
-                Ray ray = new Ray(new Vector3(x, y, b.min.z - 1f), Vector3.forward);
-                var hits = Physics.RaycastAll(ray, b.size.z + 2f).OrderBy(h => h.distance).ToList();
-                
-                if (hits.Count > 0) {
-                    if (fillSolid && hits.Count >= 2) {
-                        for (int i = 0; i < hits.Count; i += 2) {
-                            float startZ = hits[i].point.z;
-                            float endZ = (i + 1 < hits.Count) ? hits[i+1].point.z : hits[i].point.z;
-                            Color c = GetColorAtHit(hits[i]);
-                            for (float z = startZ; z <= endZ + step * 0.1f; z += step) {
-                                AddVoxel(new Vector3(x, y, z), c, b);
-                            }
-                        }
-                    } else {
-                        foreach (var hit in hits) AddVoxel(hit.point, GetColorAtHit(hit), b);
+    private void PerformFullScan(Bounds b) {
+        float scanStep = cubeSize * 0.5f;
+        Vector3 min = b.min;
+        Vector3 max = b.max;
+
+        for (float x = min.x; x <= max.x; x += scanStep)
+            for (float y = min.y; y <= max.y; y += scanStep) {
+                RaycastAndAdd(new Ray(new Vector3(x, y, min.z - 5f), Vector3.forward), (max.z - min.z) + 10f, b);
+                RaycastAndAdd(new Ray(new Vector3(x, y, max.z + 5f), Vector3.back), (max.z - min.z) + 10f, b);
+            }
+
+        for (float z = min.z; z <= max.z; z += scanStep)
+            for (float y = min.y; y <= max.y; y += scanStep) {
+                RaycastAndAdd(new Ray(new Vector3(min.x - 5f, y, z), Vector3.right), (max.x - min.x) + 10f, b);
+                RaycastAndAdd(new Ray(new Vector3(max.x + 5f, y, z), Vector3.left), (max.x - min.x) + 10f, b);
+            }
+
+        for (float x = min.x; x <= max.x; x += scanStep)
+            for (float z = min.z; z <= max.z; z += scanStep) {
+                RaycastAndAdd(new Ray(new Vector3(x, min.y - 5f, z), Vector3.up), (max.y - min.y) + 10f, b);
+                RaycastAndAdd(new Ray(new Vector3(x, max.y + 5f, z), Vector3.down), (max.y - min.y) + 10f, b);
+            }
+
+        if (fillInside)
+            FillInternalGaps(b);
+        if (hollowOut)
+            HollowOut();
+    }
+
+    private void RaycastAndAdd(Ray ray, float dist, Bounds b) {
+        foreach (RaycastHit h in Physics.RaycastAll(ray, dist)) {
+            if (h.collider == null)
+                continue;
+
+            Vector3Int gp = new Vector3Int(
+                Mathf.RoundToInt((h.point.x - b.min.x) / cubeSize),
+                Mathf.RoundToInt((h.point.y - b.min.y) / cubeSize),
+                Mathf.RoundToInt((h.point.z - b.min.z) / cubeSize)
+            );
+
+            if (!voxels.ContainsKey(gp)) {
+                Color c = GetHitColor(h);
+                voxels[gp] = new VoxelInfo { color = c, groupId = 1 };
+            }
+        }
+    }
+
+    private Color GetHitColor(RaycastHit hit) {
+        Renderer r = hit.collider.GetComponent<Renderer>();
+        if (r == null || r.sharedMaterial == null)
+            return Color.gray;
+
+        Texture2D tex = null;
+        string[] props = { "_MainTex", "_BaseMap", "_Albedo", "_BaseColorMap", "_Diffuse" };
+        foreach (string p in props) {
+            if (r.sharedMaterial.HasProperty(p)) {
+                tex = r.sharedMaterial.GetTexture(p) as Texture2D;
+                if (tex != null)
+                    break;
+            }
+        }
+
+        if (tex != null && hit.textureCoord != Vector2.zero) {
+            try {
+                string path = AssetDatabase.GetAssetPath(tex);
+                if (!string.IsNullOrEmpty(path)) {
+                    var importer = AssetImporter.GetAtPath(path) as TextureImporter;
+                    if (importer != null && !importer.isReadable) {
+                        importer.isReadable = true;
+                        importer.SaveAndReimport();
                     }
                 }
+                return tex.GetPixelBilinear(hit.textureCoord.x, hit.textureCoord.y);
+            } catch { }
+        }
+
+        if (r.sharedMaterial.HasProperty("_BaseColor"))
+            return r.sharedMaterial.GetColor("_BaseColor");
+        if (r.sharedMaterial.HasProperty("_Color"))
+            return r.sharedMaterial.GetColor("_Color");
+
+        return Color.gray;
+    }
+
+    private void BuildPrefabPreview(Bounds b) {
+        if (previewRoot)
+            DestroyImmediate(previewRoot);
+        previewRoot = new GameObject("VoxelPrefabPreview");
+        previewRoot.hideFlags = HideFlags.HideAndDontSave;
+
+        if (cubePrefab == null)
+            return;
+
+        Material baseMat = voxelMaterial ? voxelMaterial : new Material(Shader.Find("Standard"));
+
+        foreach (var v in voxels) {
+            GameObject cube = (GameObject)PrefabUtility.InstantiatePrefab(cubePrefab, previewRoot.transform);
+
+            Vector3 pos = b.min + new Vector3(
+                v.Key.x * (cubeSize + gaps.x) + cubeSize * 0.5f,
+                v.Key.y * (cubeSize + gaps.y) + cubeSize * 0.5f,
+                v.Key.z * (cubeSize + gaps.z) + cubeSize * 0.5f);
+
+            cube.transform.position = pos;
+            cube.transform.localScale = Vector3.one * cubeSize * 0.98f;
+
+            Color finalColor = ApplyOverrides(v.Value.color) * brightness;
+
+            // === PREVIEW COLOR FIX ===
+            Renderer rend = cube.GetComponentInChildren<Renderer>();
+            if (rend != null) {
+                // Preview scene mein MaterialPropertyBlock kaam nahi karta, 
+                // isliye temporary material instance use kar rahe hain
+                Material tempMat = new Material(baseMat);
+                tempMat.color = finalColor;
+                if (tempMat.HasProperty("_BaseColor"))
+                    tempMat.SetColor("_BaseColor", finalColor);
+                if (tempMat.HasProperty("_EmissionColor"))
+                    tempMat.SetColor("_EmissionColor", finalColor * 0.1f);
+
+                rend.material = tempMat;
             }
-        if (hollowOut) HollowOutLogic();
+        }
     }
 
-    private void AddVoxel(Vector3 p, Color c, Bounds b) {
-        Vector3Int gp = WorldToGrid(p, b);
-        if (!voxels.ContainsKey(gp)) voxels[gp] = new VoxelInfo { position = GridToWorld(gp, b), color = c, groupId = 1 };
-    }
-
-    private void HollowOutLogic() {
-        var keys = voxels.Keys.ToList(); HashSet<Vector3Int> ins = new HashSet<Vector3Int>();
-        foreach (var k in keys)
-            if (voxels.ContainsKey(k + Vector3Int.up) && voxels.ContainsKey(k + Vector3Int.down) && voxels.ContainsKey(k + Vector3Int.left) && voxels.ContainsKey(k + Vector3Int.right) && voxels.ContainsKey(k + Vector3Int.forward) && voxels.ContainsKey(k + Vector3Int.back)) ins.Add(k);
-        foreach (var k in ins) voxels.Remove(k);
-    }
-
-    private Vector3Int WorldToGrid(Vector3 p, Bounds b) => new Vector3Int(Mathf.RoundToInt((p.x - b.min.x) / cubeSize), Mathf.RoundToInt((p.y - b.min.y) / cubeSize), Mathf.RoundToInt((p.z - b.min.z) / cubeSize));
-    private Vector3 GridToWorld(Vector3Int g, Bounds b) => b.min + new Vector3(g.x * cubeSize + cubeSize * 0.5f, g.y * cubeSize + cubeSize * 0.5f, g.z * cubeSize + cubeSize * 0.5f);
-
-    private Color GetColorAtHit(RaycastHit hit) {
-        Renderer r = hit.collider.GetComponent<Renderer>(); if (!r || !r.sharedMaterial) return Color.gray;
-        Texture2D tex = r.sharedMaterial.mainTexture as Texture2D;
-        if (tex && hit.textureCoord != Vector2.zero) return tex.GetPixelBilinear(hit.textureCoord.x, hit.textureCoord.y);
-        return r.sharedMaterial.HasProperty("_BaseColor") ? r.sharedMaterial.GetColor("_BaseColor") : r.sharedMaterial.color;
+    private Color ApplyOverrides(Color c) {
+        foreach (var m in colorMappings)
+            if (Vector4.Distance((Vector4)c, (Vector4)m.originalColor) < colorTolerance)
+                return m.overrideColor;
+        return c;
     }
 
     private void ScanPalette() {
-        Dictionary<Color, int> counts = new Dictionary<Color, int>();
+        if (voxels.Count == 0)
+            return;
+
+        List<Color> uniqueColors = new List<Color>();
         foreach (var v in voxels.Values) {
-            Color c = v.color; bool found = false;
-            foreach (var key in counts.Keys) if (Vector4.Distance((Vector4)key, (Vector4)c) < colorTolerance) { counts[key]++; found = true; break; }
-            if (!found) counts[c] = 1;
+            bool found = false;
+            foreach (var ex in uniqueColors) {
+                if (Vector4.Distance((Vector4)v.color, (Vector4)ex) < colorTolerance) {
+                    found = true;
+                    break;
+                }
+            }
+            if (!found)
+                uniqueColors.Add(v.color);
         }
-        colorStats = counts.Select(kvp => new ColorMappingStats { originalColor = kvp.Key, overrideColor = kvp.Key, count = kvp.Value, groupId = 1 }).OrderByDescending(s => s.count).ToList();
+
+        colorMappings.Clear();
+        foreach (var c in uniqueColors)
+            colorMappings.Add(new ColorMapping { originalColor = c, overrideColor = c });
     }
 
-    private void UpdateStatsOnly() {
-        foreach (var s in colorStats) s.count = 0;
-        foreach (var v in voxels.Values) {
-            var stat = colorStats.FirstOrDefault(s => Vector4.Distance((Vector4)s.overrideColor, (Vector4)v.color) < colorTolerance);
-            if (stat != null) stat.count++;
-        }
+    private void ClearOverrides() {
+        foreach (var m in colorMappings)
+            m.overrideColor = m.originalColor;
+        RefreshPreview();
     }
 
     private void StartVoxelization() {
-        if (!cubePrefab || voxels.Count == 0) return;
-        GameObject root = new GameObject(sourceModel.name + "_Voxelized");
-        root.transform.position = sourceModel.transform.position;
-        
-        Shader s = Shader.Find("Universal Render Pipeline/Lit") ?? Shader.Find("Standard");
-        Dictionary<Color, Material> genCache = new Dictionary<Color, Material>();
+        if (!cubePrefab)
+            return;
 
-        foreach (var v in voxels.Values) {
+        GameObject root = new GameObject(sourceModel.name + "_VoxelComplete");
+        Bounds b = GetBounds();
+        Material mat = voxelMaterial ? new Material(voxelMaterial) : new Material(Shader.Find("Standard"));
+
+        int count = 0;
+        foreach (var v in voxels) {
+            count++;
+            if (count % 500 == 0)
+                EditorUtility.DisplayProgressBar("Generating...", $"{count}/{voxels.Count}", count / (float)voxels.Count);
+
             GameObject cube = (GameObject)PrefabUtility.InstantiatePrefab(cubePrefab, root.transform);
-            cube.transform.position = v.position; cube.transform.localScale = Vector3.one * cubeSize * 0.98f;
-            
-            if (!genCache.TryGetValue(v.color, out Material m)) {
-                m = new Material(s) { color = v.color }; if (m.HasProperty("_BaseColor")) m.SetColor("_BaseColor", v.color);
-                genCache[v.color] = m;
+
+            Vector3 pos = b.min + new Vector3(
+                v.Key.x * (cubeSize + gaps.x) + cubeSize * 0.5f,
+                v.Key.y * (cubeSize + gaps.y) + cubeSize * 0.5f,
+                v.Key.z * (cubeSize + gaps.z) + cubeSize * 0.5f);
+
+            cube.transform.position = pos;
+            cube.transform.localScale = Vector3.one * cubeSize * 0.98f;
+
+            Color finalColor = ApplyOverrides(v.Value.color) * brightness;
+
+            Renderer rend = cube.GetComponentInChildren<Renderer>();
+            if (rend != null) {
+                rend.sharedMaterial = mat;
+                MaterialPropertyBlock mpb = new MaterialPropertyBlock();
+                mpb.SetColor("_Color", finalColor);
+                if (rend.sharedMaterial.HasProperty("_BaseColor"))
+                    mpb.SetColor("_BaseColor", finalColor);
+                rend.SetPropertyBlock(mpb);
             }
-            
-            foreach (var rend in cube.GetComponentsInChildren<Renderer>()) rend.sharedMaterial = m;
-            var b = cube.GetComponent<Block>(); if (b) { b.blockColor = v.color; b.groupId = v.groupId; }
+
+            // Custom component support (agar apka 'Block' script hai)
+            /*
+            var block = cube.GetComponent<Block>();
+            if (block != null)
+            {
+                block.blockColor = finalColor;
+            }
+            */
         }
+
+        EditorUtility.ClearProgressBar();
         Selection.activeGameObject = root;
+        Debug.Log($"SUCCESS: Generated {voxels.Count} cubes with colors!");
     }
 
-    private Bounds GetBoundsFromObj(GameObject obj) {
-        Bounds b = new Bounds(); var rs = obj.GetComponentsInChildren<Renderer>();
-        if (rs.Length > 0) { b = rs[0].bounds; foreach (var r in rs) b.Encapsulate(r.bounds); }
-        return b;
+    private void FillInternalGaps(Bounds b) {
+        var keys = voxels.Keys.ToList();
+        if (keys.Count < 2)
+            return;
+
+        int minX = keys.Min(k => k.x), maxX = keys.Max(k => k.x);
+        int minY = keys.Min(k => k.y), maxY = keys.Max(k => k.y);
+
+        for (int x = minX; x <= maxX; x++)
+            for (int y = minY; y <= maxY; y++) {
+                var zInColumn = keys.Where(k => k.x == x && k.y == y).OrderBy(k => k.z).ToList();
+                if (zInColumn.Count >= 2) {
+                    int firstZ = zInColumn[0].z;
+                    int lastZ = zInColumn[zInColumn.Count - 1].z;
+                    for (int z = firstZ + 1; z < lastZ; z++) {
+                        Vector3Int pos = new Vector3Int(x, y, z);
+                        if (!voxels.ContainsKey(pos)) {
+                            var nearest = zInColumn.OrderBy(k => Mathf.Abs(k.z - z)).First();
+                            voxels[pos] = voxels[nearest];
+                        }
+                    }
+                }
+            }
+    }
+
+    private void HollowOut() {
+        var keys = voxels.Keys.ToList();
+        HashSet<Vector3Int> toRemove = new HashSet<Vector3Int>();
+
+        foreach (var k in keys) {
+            if (voxels.ContainsKey(k + Vector3Int.up) &&
+                voxels.ContainsKey(k + Vector3Int.down) &&
+                voxels.ContainsKey(k + Vector3Int.left) &&
+                voxels.ContainsKey(k + Vector3Int.right) &&
+                voxels.ContainsKey(k + Vector3Int.forward) &&
+                voxels.ContainsKey(k + Vector3Int.back)) {
+                toRemove.Add(k);
+            }
+        }
+        foreach (var k in toRemove)
+            voxels.Remove(k);
+    }
+
+    private void Cleanup() {
+        if (previewRoot)
+            DestroyImmediate(previewRoot);
+        if (voxelEditor)
+            DestroyImmediate(voxelEditor);
+        if (sourceEditor)
+            DestroyImmediate(sourceEditor);
     }
 }
