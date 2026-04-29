@@ -66,7 +66,7 @@ public class ThreeDToCubesTool : EditorWindow {
         EditorGUILayout.Space(5);
         using (new EditorGUILayout.HorizontalScope()) {
             EditorGUILayout.PrefixLabel("Cube Detail");
-            cubeSize = EditorGUILayout.Slider(cubeSize, 0.0001f, 3.0f);
+            cubeSize = EditorGUILayout.Slider(cubeSize, 0.05f, 3.0f);
             cubeSize = EditorGUILayout.FloatField(cubeSize, GUILayout.Width(50));
         }
 
@@ -100,8 +100,6 @@ public class ThreeDToCubesTool : EditorWindow {
             EditorGUI.BeginChangeCheck();
             mapping.overrideColor = EditorGUILayout.ColorField(GUIContent.none, mapping.overrideColor, false, true, false, GUILayout.Width(35));
             if (EditorGUI.EndChangeCheck())
-                RefreshPreview();
-            if (GUILayout.Button("Set", GUILayout.Width(45)))
                 RefreshPreview();
             EditorGUILayout.EndHorizontal();
         }
@@ -191,7 +189,7 @@ public class ThreeDToCubesTool : EditorWindow {
     }
 
     private void PerformFullScan(Bounds b) {
-        float scanStep = cubeSize * 0.5f;
+        float scanStep = cubeSize * 0.7f;
         Vector3 min = b.min;
         Vector3 max = b.max;
 
@@ -207,12 +205,6 @@ public class ThreeDToCubesTool : EditorWindow {
                 RaycastAndAdd(new Ray(new Vector3(max.x + 5f, y, z), Vector3.left), (max.x - min.x) + 10f, b);
             }
 
-        for (float x = min.x; x <= max.x; x += scanStep)
-            for (float z = min.z; z <= max.z; z += scanStep) {
-                RaycastAndAdd(new Ray(new Vector3(x, min.y - 5f, z), Vector3.up), (max.y - min.y) + 10f, b);
-                RaycastAndAdd(new Ray(new Vector3(x, max.y + 5f, z), Vector3.down), (max.y - min.y) + 10f, b);
-            }
-
         if (fillInside)
             FillInternalGaps(b);
         if (hollowOut)
@@ -223,16 +215,13 @@ public class ThreeDToCubesTool : EditorWindow {
         foreach (RaycastHit h in Physics.RaycastAll(ray, dist)) {
             if (h.collider == null)
                 continue;
-
             Vector3Int gp = new Vector3Int(
                 Mathf.RoundToInt((h.point.x - b.min.x) / cubeSize),
                 Mathf.RoundToInt((h.point.y - b.min.y) / cubeSize),
                 Mathf.RoundToInt((h.point.z - b.min.z) / cubeSize)
             );
-
             if (!voxels.ContainsKey(gp)) {
-                Color c = GetHitColor(h);
-                voxels[gp] = new VoxelInfo { color = c, groupId = 1 };
+                voxels[gp] = new VoxelInfo { color = GetHitColor(h), groupId = 1 };
             }
         }
     }
@@ -241,9 +230,8 @@ public class ThreeDToCubesTool : EditorWindow {
         Renderer r = hit.collider.GetComponent<Renderer>();
         if (r == null || r.sharedMaterial == null)
             return Color.gray;
-
         Texture2D tex = null;
-        string[] props = { "_MainTex", "_BaseMap", "_Albedo", "_BaseColorMap", "_Diffuse" };
+        string[] props = { "_MainTex", "_BaseMap", "_Albedo", "_BaseColorMap" };
         foreach (string p in props) {
             if (r.sharedMaterial.HasProperty(p)) {
                 tex = r.sharedMaterial.GetTexture(p) as Texture2D;
@@ -251,26 +239,15 @@ public class ThreeDToCubesTool : EditorWindow {
                     break;
             }
         }
-
         if (tex != null && hit.textureCoord != Vector2.zero) {
             try {
-                string path = AssetDatabase.GetAssetPath(tex);
-                if (!string.IsNullOrEmpty(path)) {
-                    var importer = AssetImporter.GetAtPath(path) as TextureImporter;
-                    if (importer != null && !importer.isReadable) {
-                        importer.isReadable = true;
-                        importer.SaveAndReimport();
-                    }
-                }
                 return tex.GetPixelBilinear(hit.textureCoord.x, hit.textureCoord.y);
             } catch { }
         }
-
-        if (r.sharedMaterial.HasProperty("_BaseColor"))
-            return r.sharedMaterial.GetColor("_BaseColor");
         if (r.sharedMaterial.HasProperty("_Color"))
             return r.sharedMaterial.GetColor("_Color");
-
+        if (r.sharedMaterial.HasProperty("_BaseColor"))
+            return r.sharedMaterial.GetColor("_BaseColor");
         return Color.gray;
     }
 
@@ -279,7 +256,6 @@ public class ThreeDToCubesTool : EditorWindow {
             DestroyImmediate(previewRoot);
         previewRoot = new GameObject("VoxelPrefabPreview");
         previewRoot.hideFlags = HideFlags.HideAndDontSave;
-
         if (cubePrefab == null)
             return;
 
@@ -287,7 +263,6 @@ public class ThreeDToCubesTool : EditorWindow {
 
         foreach (var v in voxels) {
             GameObject cube = (GameObject)PrefabUtility.InstantiatePrefab(cubePrefab, previewRoot.transform);
-
             Vector3 pos = b.min + new Vector3(
                 v.Key.x * (cubeSize + gaps.x) + cubeSize * 0.5f,
                 v.Key.y * (cubeSize + gaps.y) + cubeSize * 0.5f,
@@ -295,22 +270,15 @@ public class ThreeDToCubesTool : EditorWindow {
 
             cube.transform.position = pos;
             cube.transform.localScale = Vector3.one * cubeSize * 0.98f;
-
             Color finalColor = ApplyOverrides(v.Value.color) * brightness;
 
-            // === PREVIEW COLOR FIX ===
             Renderer rend = cube.GetComponentInChildren<Renderer>();
             if (rend != null) {
-                // Preview scene mein MaterialPropertyBlock kaam nahi karta, 
-                // isliye temporary material instance use kar rahe hain
-                Material tempMat = new Material(baseMat);
-                tempMat.color = finalColor;
-                if (tempMat.HasProperty("_BaseColor"))
-                    tempMat.SetColor("_BaseColor", finalColor);
-                if (tempMat.HasProperty("_EmissionColor"))
-                    tempMat.SetColor("_EmissionColor", finalColor * 0.1f);
-
-                rend.material = tempMat;
+                Material previewMat = new Material(baseMat);
+                previewMat.color = finalColor;
+                if (previewMat.HasProperty("_BaseColor"))
+                    previewMat.SetColor("_BaseColor", finalColor);
+                rend.sharedMaterial = previewMat;
             }
         }
     }
@@ -325,20 +293,11 @@ public class ThreeDToCubesTool : EditorWindow {
     private void ScanPalette() {
         if (voxels.Count == 0)
             return;
-
         List<Color> uniqueColors = new List<Color>();
         foreach (var v in voxels.Values) {
-            bool found = false;
-            foreach (var ex in uniqueColors) {
-                if (Vector4.Distance((Vector4)v.color, (Vector4)ex) < colorTolerance) {
-                    found = true;
-                    break;
-                }
-            }
-            if (!found)
+            if (!uniqueColors.Any(ex => Vector4.Distance((Vector4)v.color, (Vector4)ex) < colorTolerance))
                 uniqueColors.Add(v.color);
         }
-
         colorMappings.Clear();
         foreach (var c in uniqueColors)
             colorMappings.Add(new ColorMapping { originalColor = c, overrideColor = c });
@@ -350,20 +309,26 @@ public class ThreeDToCubesTool : EditorWindow {
         RefreshPreview();
     }
 
+    // --- GENERATE MODEL FIX ---
     private void StartVoxelization() {
-        if (!cubePrefab)
+        if (!cubePrefab) {
+            Debug.LogError("Cube Prefab missng hai! Pehle assign karein.");
             return;
+        }
 
-        GameObject root = new GameObject(sourceModel.name + "_VoxelComplete");
+        GameObject root = new GameObject(sourceModel.name + "_CUBE_MODEL");
         Bounds b = GetBounds();
-        Material mat = voxelMaterial ? new Material(voxelMaterial) : new Material(Shader.Find("Standard"));
+        Material baseMat = voxelMaterial ? voxelMaterial : new Material(Shader.Find("Standard"));
 
-        int count = 0;
+        int total = voxels.Count;
+        int current = 0;
+
         foreach (var v in voxels) {
-            count++;
-            if (count % 500 == 0)
-                EditorUtility.DisplayProgressBar("Generating...", $"{count}/{voxels.Count}", count / (float)voxels.Count);
+            current++;
+            if (current % 1000 == 0)
+                EditorUtility.DisplayProgressBar("Generating Model", $"{current} / {total} Cubes", (float)current / total);
 
+            // Exactly Preview jaisa spawn karega
             GameObject cube = (GameObject)PrefabUtility.InstantiatePrefab(cubePrefab, root.transform);
 
             Vector3 pos = b.min + new Vector3(
@@ -375,52 +340,37 @@ public class ThreeDToCubesTool : EditorWindow {
             cube.transform.localScale = Vector3.one * cubeSize * 0.98f;
 
             Color finalColor = ApplyOverrides(v.Value.color) * brightness;
-
             Renderer rend = cube.GetComponentInChildren<Renderer>();
-            if (rend != null) {
-                rend.sharedMaterial = mat;
-                MaterialPropertyBlock mpb = new MaterialPropertyBlock();
-                mpb.SetColor("_Color", finalColor);
-                if (rend.sharedMaterial.HasProperty("_BaseColor"))
-                    mpb.SetColor("_BaseColor", finalColor);
-                rend.SetPropertyBlock(mpb);
-            }
 
-            // Custom component support (agar apka 'Block' script hai)
-            /*
-            var block = cube.GetComponent<Block>();
-            if (block != null)
-            {
-                block.blockColor = finalColor;
+            if (rend != null) {
+                // Har cube ko unique color dene ke liye instance material
+                Material instMat = new Material(baseMat);
+                instMat.color = finalColor;
+                if (instMat.HasProperty("_BaseColor"))
+                    instMat.SetColor("_BaseColor", finalColor);
+                rend.sharedMaterial = instMat;
             }
-            */
         }
 
         EditorUtility.ClearProgressBar();
         Selection.activeGameObject = root;
-        Debug.Log($"SUCCESS: Generated {voxels.Count} cubes with colors!");
+        Debug.Log("Model Generated Successfully!");
     }
 
     private void FillInternalGaps(Bounds b) {
         var keys = voxels.Keys.ToList();
         if (keys.Count < 2)
             return;
-
         int minX = keys.Min(k => k.x), maxX = keys.Max(k => k.x);
         int minY = keys.Min(k => k.y), maxY = keys.Max(k => k.y);
-
         for (int x = minX; x <= maxX; x++)
             for (int y = minY; y <= maxY; y++) {
                 var zInColumn = keys.Where(k => k.x == x && k.y == y).OrderBy(k => k.z).ToList();
                 if (zInColumn.Count >= 2) {
-                    int firstZ = zInColumn[0].z;
-                    int lastZ = zInColumn[zInColumn.Count - 1].z;
-                    for (int z = firstZ + 1; z < lastZ; z++) {
+                    for (int z = zInColumn.First().z + 1; z < zInColumn.Last().z; z++) {
                         Vector3Int pos = new Vector3Int(x, y, z);
-                        if (!voxels.ContainsKey(pos)) {
-                            var nearest = zInColumn.OrderBy(k => Mathf.Abs(k.z - z)).First();
-                            voxels[pos] = voxels[nearest];
-                        }
+                        if (!voxels.ContainsKey(pos))
+                            voxels[pos] = voxels[zInColumn.First()];
                     }
                 }
             }
@@ -429,16 +379,11 @@ public class ThreeDToCubesTool : EditorWindow {
     private void HollowOut() {
         var keys = voxels.Keys.ToList();
         HashSet<Vector3Int> toRemove = new HashSet<Vector3Int>();
-
         foreach (var k in keys) {
-            if (voxels.ContainsKey(k + Vector3Int.up) &&
-                voxels.ContainsKey(k + Vector3Int.down) &&
-                voxels.ContainsKey(k + Vector3Int.left) &&
-                voxels.ContainsKey(k + Vector3Int.right) &&
-                voxels.ContainsKey(k + Vector3Int.forward) &&
-                voxels.ContainsKey(k + Vector3Int.back)) {
+            if (voxels.ContainsKey(k + Vector3Int.up) && voxels.ContainsKey(k + Vector3Int.down) &&
+                voxels.ContainsKey(k + Vector3Int.left) && voxels.ContainsKey(k + Vector3Int.right) &&
+                voxels.ContainsKey(k + Vector3Int.forward) && voxels.ContainsKey(k + Vector3Int.back))
                 toRemove.Add(k);
-            }
         }
         foreach (var k in toRemove)
             voxels.Remove(k);
