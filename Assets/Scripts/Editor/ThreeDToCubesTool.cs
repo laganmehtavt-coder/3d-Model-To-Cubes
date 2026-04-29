@@ -31,7 +31,7 @@ public class ThreeDToCubesTool : EditorWindow {
     }
 
     private Dictionary<Vector3Int, VoxelInfo> voxels = new Dictionary<Vector3Int, VoxelInfo>();
-    private List<Renderer> sourceRenderers = new List<Renderer>();
+    private Bounds currentBounds;
 
     [MenuItem("Tools/3D TO CUBES PRO")]
     public static void Open() {
@@ -110,8 +110,14 @@ public class ThreeDToCubesTool : EditorWindow {
 
         GUI.backgroundColor = new Color(0, 0.9f, 0.3f);
         if (GUILayout.Button("GENERATE COMPLETE MODEL", GUILayout.Height(50))) {
-            if (sourceModel && cubePrefab)
-                StartVoxelization();
+            if (sourceModel && cubePrefab) {
+                if (voxels.Count > 0)
+                    StartVoxelization();
+                else
+                    Debug.LogWarning("Pehle scan karein! Voxel data empty hai.");
+            } else {
+                Debug.LogError("Source Model aur Cube Prefab assign karein.");
+            }
         }
         GUI.backgroundColor = Color.white;
 
@@ -147,11 +153,12 @@ public class ThreeDToCubesTool : EditorWindow {
         EditorGUILayout.EndHorizontal();
     }
 
-    private Bounds GetBounds() {
+    private Bounds GetBounds(GameObject obj) {
         Bounds b = new Bounds();
-        if (sourceRenderers.Count > 0) {
-            b = sourceRenderers[0].bounds;
-            foreach (var r in sourceRenderers)
+        Renderer[] renderers = obj.GetComponentsInChildren<Renderer>();
+        if (renderers.Length > 0) {
+            b = renderers[0].bounds;
+            foreach (var r in renderers)
                 b.Encapsulate(r.bounds);
         }
         return b;
@@ -165,7 +172,6 @@ public class ThreeDToCubesTool : EditorWindow {
         GameObject scanTemp = Instantiate(sourceModel);
         scanTemp.transform.SetPositionAndRotation(Vector3.zero, Quaternion.identity);
 
-        sourceRenderers.Clear();
         foreach (var renderer in scanTemp.GetComponentsInChildren<Renderer>()) {
             Mesh mesh = renderer is MeshRenderer mr ? mr.GetComponent<MeshFilter>()?.sharedMesh :
                         renderer is SkinnedMeshRenderer smr ? smr.sharedMesh : null;
@@ -175,14 +181,13 @@ public class ThreeDToCubesTool : EditorWindow {
                     var col = renderer.gameObject.AddComponent<MeshCollider>();
                     col.sharedMesh = mesh;
                 }
-                sourceRenderers.Add(renderer);
             }
         }
 
-        Bounds b = GetBounds();
+        currentBounds = GetBounds(scanTemp);
         voxels.Clear();
-        PerformFullScan(b);
-        BuildPrefabPreview(b);
+        PerformFullScan(currentBounds);
+        BuildPrefabPreview(currentBounds);
 
         DestroyImmediate(scanTemp);
         Repaint();
@@ -312,47 +317,52 @@ public class ThreeDToCubesTool : EditorWindow {
     // --- GENERATE MODEL FIX ---
     private void StartVoxelization() {
         if (!cubePrefab) {
-            Debug.LogError("Cube Prefab missng hai! Pehle assign karein.");
+            Debug.LogError("Cube Prefab missing hai! Pehle assign karein.");
             return;
         }
 
         GameObject root = new GameObject(sourceModel.name + "_CUBE_MODEL");
-        Bounds b = GetBounds();
+        Bounds b = currentBounds;
         Material baseMat = voxelMaterial ? voxelMaterial : new Material(Shader.Find("Standard"));
 
         int total = voxels.Count;
         int current = 0;
 
-        foreach (var v in voxels) {
-            current++;
-            if (current % 1000 == 0)
-                EditorUtility.DisplayProgressBar("Generating Model", $"{current} / {total} Cubes", (float)current / total);
+        try {
+            foreach (var v in voxels) {
+                current++;
+                if (current % 100 == 0) {
+                    if (EditorUtility.DisplayCancelableProgressBar("Generating Model", $"{current} / {total} Cubes", (float)current / total)) {
+                        Debug.LogWarning("Generation cancelled by user.");
+                        break;
+                    }
+                }
 
-            // Exactly Preview jaisa spawn karega
-            GameObject cube = (GameObject)PrefabUtility.InstantiatePrefab(cubePrefab, root.transform);
+                GameObject cube = (GameObject)PrefabUtility.InstantiatePrefab(cubePrefab, root.transform);
 
-            Vector3 pos = b.min + new Vector3(
-                v.Key.x * (cubeSize + gaps.x) + cubeSize * 0.5f,
-                v.Key.y * (cubeSize + gaps.y) + cubeSize * 0.5f,
-                v.Key.z * (cubeSize + gaps.z) + cubeSize * 0.5f);
+                Vector3 pos = b.min + new Vector3(
+                    v.Key.x * (cubeSize + gaps.x) + cubeSize * 0.5f,
+                    v.Key.y * (cubeSize + gaps.y) + cubeSize * 0.5f,
+                    v.Key.z * (cubeSize + gaps.z) + cubeSize * 0.5f);
 
-            cube.transform.position = pos;
-            cube.transform.localScale = Vector3.one * cubeSize * 0.98f;
+                cube.transform.position = pos;
+                cube.transform.localScale = Vector3.one * cubeSize * 0.98f;
 
-            Color finalColor = ApplyOverrides(v.Value.color) * brightness;
-            Renderer rend = cube.GetComponentInChildren<Renderer>();
+                Color finalColor = ApplyOverrides(v.Value.color) * brightness;
+                Renderer rend = cube.GetComponentInChildren<Renderer>();
 
-            if (rend != null) {
-                // Har cube ko unique color dene ke liye instance material
-                Material instMat = new Material(baseMat);
-                instMat.color = finalColor;
-                if (instMat.HasProperty("_BaseColor"))
-                    instMat.SetColor("_BaseColor", finalColor);
-                rend.sharedMaterial = instMat;
+                if (rend != null) {
+                    Material instMat = new Material(baseMat);
+                    instMat.color = finalColor;
+                    if (instMat.HasProperty("_BaseColor"))
+                        instMat.SetColor("_BaseColor", finalColor);
+                    rend.sharedMaterial = instMat;
+                }
             }
+        } finally {
+            EditorUtility.ClearProgressBar();
         }
 
-        EditorUtility.ClearProgressBar();
         Selection.activeGameObject = root;
         Debug.Log("Model Generated Successfully!");
     }
